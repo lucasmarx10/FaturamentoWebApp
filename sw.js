@@ -1,5 +1,5 @@
 // Service worker simples: cache para funcionar offline.
-const CACHE = "faturamento-v1";
+const CACHE = "faturamento-v2";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (e) => {

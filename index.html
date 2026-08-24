@@ -258,6 +258,7 @@ let state = {
   seq: 1,
   transactions: [],            // {id, seriesId, name, amount, type, monthIndex, dayOfMonth, recurrence, installmentNumber, installmentTotal, settled, isOverride}
   paidExcludedMonths: [],
+  seriesEnds: {},              // { [seriesId]: ultimoMesValido } — série fixa encerrada em "esta e as seguintes"; impede a regeneração
   prefs: { theme:"system", accent:"GREEN", amoled:false, compact:false, sortField:"DATE", sortAscending:true }
 };
 let currentMonth = nowMonthIndex();
@@ -372,6 +373,7 @@ function parseAmount(s){
 
 function load(){
   try{ const raw=localStorage.getItem(KEY); if(raw){ const o=JSON.parse(raw); state = Object.assign(state,o); state.prefs=Object.assign({theme:"system",accent:"GREEN",amoled:false,compact:false,sortField:"DATE",sortAscending:true}, o.prefs||{}); } }catch(e){}
+  if(!state.seriesEnds || typeof state.seriesEnds!=="object") state.seriesEnds={};
 }
 function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
 
@@ -394,10 +396,13 @@ function addNew(inp){
 function ensureCoverage(upto){
   const sids=[...new Set(state.transactions.filter(t=>t.recurrence==="FIXED"&&t.seriesId).map(t=>t.seriesId))];
   for(const sid of sids){
+    // Séries encerradas ("esta e as seguintes") não crescem além do mês em que terminaram.
+    const cap = (sid in state.seriesEnds) ? state.seriesEnds[sid] : Infinity;
+    const target = Math.min(upto, cap);
     let rows=state.transactions.filter(t=>t.seriesId===sid);
     let latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
     let guard=0;
-    while(latest.monthIndex<upto && guard++<600){
+    while(latest.monthIndex<target && guard++<600){
       pushTx({seriesId:sid, name:latest.name, amount:latest.amount, type:latest.type, monthIndex:latest.monthIndex+1, dayOfMonth:latest.dayOfMonth, recurrence:"FIXED"});
       rows=state.transactions.filter(t=>t.seriesId===sid);
       latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
@@ -423,7 +428,14 @@ function deleteScoped(tx, scope){
   if(tx.recurrence==="NONE" || scope==="SINGLE"){
     state.transactions=state.transactions.filter(t=>t.id!==tx.id);
   } else {
+    // "Esta e as seguintes": remove de tx.monthIndex em diante...
     state.transactions=state.transactions.filter(t=>!(t.seriesId===tx.seriesId && t.monthIndex>=tx.monthIndex));
+    // ...e, se for série FIXA, registra que ela terminou aqui para a ensureCoverage não recriá-la.
+    if(tx.recurrence==="FIXED" && tx.seriesId){
+      const restam=state.transactions.some(t=>t.seriesId===tx.seriesId);
+      if(restam) state.seriesEnds[tx.seriesId]=tx.monthIndex-1; // encerra a série no mês anterior
+      else delete state.seriesEnds[tx.seriesId];                // apagou tudo: série deixa de existir
+    }
   }
 }
 
@@ -619,7 +631,7 @@ function importBackup(text){
   try{
     const o=JSON.parse(text);
     const arr=o.transactions||[];
-    state.transactions=[]; state.seq=1;
+    state.transactions=[]; state.seq=1; state.seriesEnds={};
     for(const t of arr){
       pushTx({ seriesId:t.seriesId??null, name:t.name, amount:Number(t.amount), type:t.type,
         monthIndex:t.monthIndex, dayOfMonth:t.dayOfMonth, recurrence:t.recurrence,
