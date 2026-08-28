@@ -96,6 +96,11 @@
   .swatches{ display:flex; gap:10px; flex-wrap:wrap; }
   .swatch{ width:34px; height:34px; border-radius:50%; border:2px solid transparent; cursor:pointer; }
   .swatch.sel{ border-color:var(--text); }
+  .catrow{ display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--surface2); border-radius:10px; margin-bottom:6px; }
+  body.amoled .catrow{ background:#0d0d0d; }
+  .catrow .cemoji{ font-size:18px; width:24px; text-align:center; }
+  .catrow .clabel{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .catrow .cbtn{ background:none; border:none; color:var(--muted); font-size:17px; padding:4px 6px; cursor:pointer; }
   .switch{ width:48px; height:28px; border-radius:20px; background:var(--surface2); border:1px solid var(--divider); position:relative; cursor:pointer; }
   .switch.on{ background:var(--accent); }
   .switch .knob{ position:absolute; top:2px; left:2px; width:22px; height:22px; border-radius:50%; background:#fff; transition:left .15s; }
@@ -165,6 +170,8 @@
       <button data-v="EXPENSE" class="sel">Saída</button>
       <button data-v="INCOME">Entrada</button>
     </div>
+    <label>Categoria (opcional)</label>
+    <select id="fCategory"></select>
     <div id="recWrap">
       <label>Recorrência</label>
       <div class="seg" id="fRec">
@@ -224,6 +231,13 @@
     </div>
     <div class="row-between"><span>Ordem crescente</span><div class="switch" id="sSortAsc"><div class="knob"></div></div></div>
 
+    <div class="seclabel">Categorias</div>
+    <div id="catList"></div>
+    <div class="actions" style="margin-top:10px">
+      <button class="btn-ghost" id="catAdd">+ Adicionar categoria</button>
+    </div>
+    <div class="hint">Usadas para classificar lançamentos. Remover uma categoria não apaga lançamentos — eles ficam “Sem categoria”.</div>
+
     <div class="seclabel">Backup</div>
     <div class="actions">
       <button class="btn-ghost" id="bExport">Exportar / Compartilhar</button>
@@ -243,6 +257,22 @@
   </div>
 </div>
 
+<!-- Modal: adicionar/editar categoria -->
+<div class="overlay" id="catOverlay">
+  <div class="sheet">
+    <h3 id="catTitle">Nova categoria</h3>
+    <label>Emoji (opcional)</label>
+    <input type="text" id="cEmoji" maxlength="4" placeholder="🏷️" />
+    <label>Nome</label>
+    <input type="text" id="cLabel" autocomplete="off" placeholder="Ex.: Assinaturas" />
+    <div class="actions">
+      <button class="btn-ghost" id="catCancel">Cancelar</button>
+      <button class="btn-danger" id="catDelete" style="display:none">Remover</button>
+      <button class="btn-primary" id="catSave">Salvar</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 
@@ -257,17 +287,36 @@ const ACCENTS = {
 };
 const MONTHS = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 
+// ---------- Categorias padrão (a pessoa pode editar/adicionar/remover nas Configurações) ----------
+// id estável (para backup portável); emoji + label exibidos. Categorias criadas pelo usuário ganham id gerado.
+const DEFAULT_CATEGORIES = [
+  {id:"alimentacao", emoji:"🍔", label:"Alimentação"},
+  {id:"transporte",  emoji:"🚕", label:"Transporte"},
+  {id:"moradia",     emoji:"🏠", label:"Moradia"},
+  {id:"contas",      emoji:"💡", label:"Contas"},
+  {id:"saude",       emoji:"🩺", label:"Saúde"},
+  {id:"educacao",    emoji:"🎓", label:"Educação"},
+  {id:"lazer",       emoji:"🎮", label:"Lazer"},
+  {id:"compras",     emoji:"🛍️", label:"Compras"},
+  {id:"dividas",     emoji:"💳", label:"Dívidas"},
+  {id:"trabalho",    emoji:"💼", label:"Trabalho"},
+  {id:"outros",      emoji:"📦", label:"Outros"},
+];
+function defaultCategories(){ return DEFAULT_CATEGORIES.map(c=>Object.assign({}, c)); }
+
 // ---------- Estado ----------
 const KEY = "faturamento_web_v1";
 let state = {
   seq: 1,
-  transactions: [],            // {id, seriesId, name, amount, type, monthIndex, dayOfMonth, recurrence, installmentNumber, installmentTotal, settled, isOverride}
+  transactions: [],            // {id, seriesId, name, amount, type, monthIndex, dayOfMonth, recurrence, installmentNumber, installmentTotal, settled, isOverride, details, category}
   paidExcludedMonths: [],
   seriesEnds: {},              // { [seriesId]: ultimoMesValido } — série fixa encerrada em "esta e as seguintes"; impede a regeneração
+  categories: defaultCategories(),  // [{id, emoji, label}]
   prefs: { theme:"system", accent:"GREEN", amoled:false, compact:false, sortField:"DATE", sortAscending:true }
 };
 let currentMonth = nowMonthIndex();
 let editing = null;   // tx sendo editado (ou null = novo)
+let catEditing = null; // categoria sendo editada nas Configurações (ou null = nova)
 let pendingScope = null; // {kind:'edit'|'delete', data}
 
 // ---------- Utilidades ----------
@@ -379,14 +428,15 @@ function parseAmount(s){
 function load(){
   try{ const raw=localStorage.getItem(KEY); if(raw){ const o=JSON.parse(raw); state = Object.assign(state,o); state.prefs=Object.assign({theme:"system",accent:"GREEN",amoled:false,compact:false,sortField:"DATE",sortAscending:true}, o.prefs||{}); } }catch(e){}
   if(!state.seriesEnds || typeof state.seriesEnds!=="object") state.seriesEnds={};
+  if(!Array.isArray(state.categories) || state.categories.length===0) state.categories=defaultCategories();
 }
 function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
 
 // ---------- Recorrência / materialização (espelha o app Android) ----------
-function pushTx(t){ state.transactions.push(Object.assign({id:nextId(), settled:false, isOverride:false, installmentNumber:null, installmentTotal:null, seriesId:null, details:""}, t)); }
+function pushTx(t){ state.transactions.push(Object.assign({id:nextId(), settled:false, isOverride:false, installmentNumber:null, installmentTotal:null, seriesId:null, details:"", category:""}, t)); }
 
 function addNew(inp){
-  const base = { name:inp.name, amount:inp.amount, type:inp.type, dayOfMonth:inp.dayOfMonth, details:inp.details||"" };
+  const base = { name:inp.name, amount:inp.amount, type:inp.type, dayOfMonth:inp.dayOfMonth, details:inp.details||"", category:inp.category||"" };
   if(inp.recurrence==="NONE"){
     pushTx(Object.assign({}, base, {monthIndex:inp.monthIndex, recurrence:"NONE"}));
   } else if(inp.recurrence==="FIXED"){
@@ -408,7 +458,7 @@ function ensureCoverage(upto){
     let latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
     let guard=0;
     while(latest.monthIndex<target && guard++<600){
-      pushTx({seriesId:sid, name:latest.name, amount:latest.amount, type:latest.type, monthIndex:latest.monthIndex+1, dayOfMonth:latest.dayOfMonth, recurrence:"FIXED", details:latest.details||""});
+      pushTx({seriesId:sid, name:latest.name, amount:latest.amount, type:latest.type, monthIndex:latest.monthIndex+1, dayOfMonth:latest.dayOfMonth, recurrence:"FIXED", details:latest.details||"", category:latest.category||""});
       rows=state.transactions.filter(t=>t.seriesId===sid);
       latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
     }
@@ -421,11 +471,11 @@ function updateScoped(edited, scope){
   const orig=txById(edited.id); if(!orig) return;
   if(orig.recurrence==="NONE" || scope==="SINGLE"){
     orig.name=edited.name; orig.amount=edited.amount; orig.type=edited.type;
-    orig.monthIndex=edited.monthIndex; orig.dayOfMonth=edited.dayOfMonth; orig.details=edited.details||"";
+    orig.monthIndex=edited.monthIndex; orig.dayOfMonth=edited.dayOfMonth; orig.details=edited.details||""; orig.category=edited.category||"";
     if(orig.recurrence!=="NONE") orig.isOverride=true;
   } else { // THIS_AND_FOLLOWING
     const rows=state.transactions.filter(t=>t.seriesId===orig.seriesId && t.monthIndex>=orig.monthIndex);
-    for(const r of rows){ r.name=edited.name; r.amount=edited.amount; r.type=edited.type; r.dayOfMonth=edited.dayOfMonth; r.details=edited.details||""; }
+    for(const r of rows){ r.name=edited.name; r.amount=edited.amount; r.type=edited.type; r.dayOfMonth=edited.dayOfMonth; r.details=edited.details||""; r.category=edited.category||""; }
   }
 }
 
@@ -455,11 +505,17 @@ function applyTheme(){
   document.documentElement.style.setProperty("--accent", dark?acc.dark:acc.light);
 }
 
+function catById(id){ return id ? state.categories.find(c=>c.id===id) : null; }
+function catText(t){ const c=catById(t.category); return c ? ((c.emoji?c.emoji+" ":"")+c.label) : ""; }
+
 function subtitle(t){
   const d=formatDate(t.monthIndex,t.dayOfMonth);
-  if(t.recurrence==="FIXED") return d+" · Fixa";
-  if(t.recurrence==="INSTALLMENT") return d+" · Parcela "+t.installmentNumber+"/"+t.installmentTotal;
-  return d;
+  let base;
+  if(t.recurrence==="FIXED") base=d+" · Fixa";
+  else if(t.recurrence==="INSTALLMENT") base=d+" · Parcela "+t.installmentNumber+"/"+t.installmentTotal;
+  else base=d;
+  const cat=catText(t);
+  return cat ? (cat+" · "+base) : base;
 }
 function chipLabel(t){
   if(t.type==="INCOME") return t.settled?"Recebido":"A receber";
@@ -541,6 +597,7 @@ function openEditor(tx){
   document.getElementById("fName").value=tx?tx.name:"";
   document.getElementById("fAmount").value=tx?String(tx.amount).replace(".",","):"";
   document.getElementById("fDetails").value=tx&&tx.details?tx.details:"";
+  fillCategorySelect(tx&&tx.category?tx.category:"");
   const {year,month}=ymOf(tx?tx.monthIndex:currentMonth);
   const day=tx?Math.min(tx.dayOfMonth,daysInMonth(year,month)):Math.min(new Date().getDate(),daysInMonth(year,month));
   document.getElementById("fDate").value=year+"-"+pad2(month)+"-"+pad2(day);
@@ -549,6 +606,19 @@ function openEditor(tx){
   document.getElementById("instWrap").style.display="none";
   document.getElementById("fInst").value="2";
   showOverlay("editOverlay");
+}
+
+function fillCategorySelect(selectedId){
+  const sel=document.getElementById("fCategory");
+  sel.innerHTML="";
+  const none=document.createElement("option"); none.value=""; none.textContent="— Sem categoria —"; sel.appendChild(none);
+  for(const c of state.categories){
+    const o=document.createElement("option"); o.value=c.id;
+    o.textContent=(c.emoji?c.emoji+" ":"")+c.label;
+    sel.appendChild(o);
+  }
+  // Se a categoria salva não existe mais (foi removida), volta para "sem categoria" na tela (o dado bruto é preservado).
+  sel.value = (selectedId && state.categories.some(c=>c.id===selectedId)) ? selectedId : "";
 }
 
 function collectEditorInput(){
@@ -560,7 +630,8 @@ function collectEditorInput(){
   if(!dv){ alert("Informe a data."); return null; }
   const [y,m,d]=dv.split("-").map(Number);
   const details=document.getElementById("fDetails").value.trim();
-  return { name, amount, type:getSeg("fType"), monthIndex:y*12+(m-1), dayOfMonth:d, details,
+  const category=document.getElementById("fCategory").value||"";
+  return { name, amount, type:getSeg("fType"), monthIndex:y*12+(m-1), dayOfMonth:d, details, category,
            recurrence:getSeg("fRec"), installmentTotal:parseInt(document.getElementById("fInst").value)||2 };
 }
 
@@ -570,7 +641,7 @@ function onSave(){
     addNew(inp); save(); hideOverlay("editOverlay"); render(); return;
   }
   // edição
-  const edited={ id:editing.id, name:inp.name, amount:inp.amount, type:inp.type, monthIndex:inp.monthIndex, dayOfMonth:inp.dayOfMonth, details:inp.details||"" };
+  const edited={ id:editing.id, name:inp.name, amount:inp.amount, type:inp.type, monthIndex:inp.monthIndex, dayOfMonth:inp.dayOfMonth, details:inp.details||"", category:inp.category||"" };
   if(editing.recurrence==="NONE"){
     updateScoped(edited,"SINGLE"); save(); hideOverlay("editOverlay"); render();
   } else {
@@ -618,7 +689,57 @@ function openSettings(){
   setSwitch("sCompact",state.prefs.compact);
   setSeg("sSortField",state.prefs.sortField);
   setSwitch("sSortAsc",state.prefs.sortAscending);
+  renderCategoryManager();
   showOverlay("settingsOverlay");
+}
+
+// ---------- Gerenciador de categorias (Configurações) ----------
+function renderCategoryManager(){
+  const wrap=document.getElementById("catList"); wrap.innerHTML="";
+  if(state.categories.length===0){
+    wrap.innerHTML='<div class="hint">Nenhuma categoria. Toque em “Adicionar categoria”.</div>';
+    return;
+  }
+  for(const c of state.categories){
+    const row=document.createElement("div"); row.className="catrow";
+    const em=document.createElement("div"); em.className="cemoji"; em.textContent=c.emoji||"🏷️";
+    const lb=document.createElement("div"); lb.className="clabel"; lb.textContent=c.label;
+    const ed=document.createElement("button"); ed.className="cbtn"; ed.textContent="✏️"; ed.title="Editar";
+    ed.onclick=()=>openCatEditor(c);
+    const rm=document.createElement("button"); rm.className="cbtn"; rm.textContent="🗑️"; rm.title="Remover";
+    rm.onclick=()=>removeCategory(c);
+    row.appendChild(em); row.appendChild(lb); row.appendChild(ed); row.appendChild(rm);
+    wrap.appendChild(row);
+  }
+}
+function openCatEditor(cat){
+  catEditing=cat||null;
+  document.getElementById("catTitle").textContent=cat?"Editar categoria":"Nova categoria";
+  document.getElementById("cEmoji").value=cat?(cat.emoji||""):"";
+  document.getElementById("cLabel").value=cat?cat.label:"";
+  document.getElementById("catDelete").style.display=cat?"":"none";
+  showOverlay("catOverlay");
+}
+function saveCategory(){
+  const emoji=document.getElementById("cEmoji").value.trim();
+  const label=document.getElementById("cLabel").value.trim();
+  if(!label){ alert("Informe o nome da categoria."); return; }
+  if(catEditing){
+    catEditing.emoji=emoji; catEditing.label=label;
+  } else {
+    state.categories.push({ id:uuid(), emoji, label });
+  }
+  catEditing=null; save();
+  hideOverlay("catOverlay"); renderCategoryManager(); render();
+}
+function removeCategory(cat){
+  const emUso=state.transactions.filter(t=>t.category===cat.id).length;
+  const msg = emUso>0
+    ? "Remover a categoria \""+cat.label+"\"?\n"+emUso+" lançamento(s) usam ela e ficarão \"Sem categoria\" (nenhum será apagado)."
+    : "Remover a categoria \""+cat.label+"\"?";
+  if(!confirm(msg)) return;
+  state.categories=state.categories.filter(c=>c.id!==cat.id);
+  save(); renderCategoryManager(); render();
 }
 
 // ---------- Backup ----------
@@ -626,7 +747,8 @@ function exportBackup(){
   const data={ version:3, transactions: state.transactions.map(t=>({
     seriesId:t.seriesId, name:t.name, amount:t.amount, type:t.type, monthIndex:t.monthIndex,
     dayOfMonth:t.dayOfMonth, recurrence:t.recurrence, installmentNumber:t.installmentNumber,
-    installmentTotal:t.installmentTotal, isOverride:!!t.isOverride, settled:!!t.settled, details:t.details||"" })), tasks:[] };
+    installmentTotal:t.installmentTotal, isOverride:!!t.isOverride, settled:!!t.settled, details:t.details||"", category:t.category||"" })),
+    categories: state.categories, tasks:[] };
   const json=JSON.stringify(data,null,2);
   const blob=new Blob([json],{type:"application/json"});
   const fname="faturamento-backup.json";
@@ -644,11 +766,15 @@ function importBackup(text){
     const o=JSON.parse(text);
     const arr=o.transactions||[];
     state.transactions=[]; state.seq=1; state.seriesEnds={};
+    // Categorias: se o backup trouxer, usa as dele; senão mantém as atuais (backup do Android não tem categorias).
+    if(Array.isArray(o.categories) && o.categories.length){
+      state.categories=o.categories.map(c=>({ id:c.id||uuid(), emoji:c.emoji||"", label:c.label||"Categoria" }));
+    }
     for(const t of arr){
       pushTx({ seriesId:t.seriesId??null, name:t.name, amount:Number(t.amount), type:t.type,
         monthIndex:t.monthIndex, dayOfMonth:t.dayOfMonth, recurrence:t.recurrence,
         installmentNumber:t.installmentNumber??null, installmentTotal:t.installmentTotal??null,
-        isOverride:!!t.isOverride, details:t.details??"" });
+        isOverride:!!t.isOverride, details:t.details??"", category:t.category??"" });
       state.transactions[state.transactions.length-1].settled=!!t.settled;
     }
     save(); render(); alert("Backup importado ("+arr.length+" itens).");
@@ -690,6 +816,11 @@ function bind(){
   document.getElementById("sCompact").onclick=()=>{ state.prefs.compact=!state.prefs.compact; save(); setSwitch("sCompact",state.prefs.compact); render(); };
   document.getElementById("sSortAsc").onclick=()=>{ state.prefs.sortAscending=!state.prefs.sortAscending; save(); setSwitch("sSortAsc",state.prefs.sortAscending); render(); };
   document.getElementById("settingsClose").onclick=()=>hideOverlay("settingsOverlay");
+
+  document.getElementById("catAdd").onclick=()=>openCatEditor(null);
+  document.getElementById("catCancel").onclick=()=>hideOverlay("catOverlay");
+  document.getElementById("catSave").onclick=saveCategory;
+  document.getElementById("catDelete").onclick=()=>{ if(catEditing){ const c=catEditing; hideOverlay("catOverlay"); removeCategory(c); } };
 
   document.getElementById("bExport").onclick=exportBackup;
   document.getElementById("bImport").onclick=()=>document.getElementById("importFile").click();
