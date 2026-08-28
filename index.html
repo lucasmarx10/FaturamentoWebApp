@@ -59,6 +59,8 @@
   .card .info{ flex:1; min-width:0; }
   .card .name{ font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .card .sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .card .note{ font-size:12px; color:var(--muted); margin-top:3px; white-space:normal; word-break:break-word; opacity:.9; }
+  body.compact .card .note{ font-size:11px; }
   .chip{ font-size:11px; padding:4px 10px; border-radius:20px; border:1px solid var(--muted); color:var(--muted);
     background:none; white-space:nowrap; cursor:pointer; }
   .chip.on{ background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -78,9 +80,10 @@
   body.amoled .sheet{ background:#0d0d0d; }
   .sheet h3{ margin:0 0 14px; }
   label{ display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
-  input[type=text],input[type=number],input[type=date],select{
+  input[type=text],input[type=number],input[type=date],select,textarea{
     width:100%; padding:12px; border-radius:10px; border:1px solid var(--divider);
     background:var(--bg); color:var(--text); font-size:16px; }
+  textarea{ font-family:inherit; min-height:64px; resize:vertical; line-height:1.35; }
   .seg{ display:flex; gap:8px; }
   .seg button{ flex:1; padding:10px; border-radius:10px; border:1px solid var(--divider); background:var(--bg); color:var(--text); cursor:pointer; }
   .seg button.sel{ background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -174,6 +177,8 @@
         <input type="number" id="fInst" min="2" value="2" />
       </div>
     </div>
+    <label>Detalhes (opcional)</label>
+    <textarea id="fDetails" rows="2" placeholder="Anotações sobre este lançamento…"></textarea>
     <div class="actions">
       <button class="btn-ghost" id="editCancel">Cancelar</button>
       <button class="btn-danger" id="editDelete" style="display:none">Excluir</button>
@@ -378,10 +383,10 @@ function load(){
 function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
 
 // ---------- Recorrência / materialização (espelha o app Android) ----------
-function pushTx(t){ state.transactions.push(Object.assign({id:nextId(), settled:false, isOverride:false, installmentNumber:null, installmentTotal:null, seriesId:null}, t)); }
+function pushTx(t){ state.transactions.push(Object.assign({id:nextId(), settled:false, isOverride:false, installmentNumber:null, installmentTotal:null, seriesId:null, details:""}, t)); }
 
 function addNew(inp){
-  const base = { name:inp.name, amount:inp.amount, type:inp.type, dayOfMonth:inp.dayOfMonth };
+  const base = { name:inp.name, amount:inp.amount, type:inp.type, dayOfMonth:inp.dayOfMonth, details:inp.details||"" };
   if(inp.recurrence==="NONE"){
     pushTx(Object.assign({}, base, {monthIndex:inp.monthIndex, recurrence:"NONE"}));
   } else if(inp.recurrence==="FIXED"){
@@ -403,7 +408,7 @@ function ensureCoverage(upto){
     let latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
     let guard=0;
     while(latest.monthIndex<target && guard++<600){
-      pushTx({seriesId:sid, name:latest.name, amount:latest.amount, type:latest.type, monthIndex:latest.monthIndex+1, dayOfMonth:latest.dayOfMonth, recurrence:"FIXED"});
+      pushTx({seriesId:sid, name:latest.name, amount:latest.amount, type:latest.type, monthIndex:latest.monthIndex+1, dayOfMonth:latest.dayOfMonth, recurrence:"FIXED", details:latest.details||""});
       rows=state.transactions.filter(t=>t.seriesId===sid);
       latest=rows.reduce((a,b)=> a.monthIndex>=b.monthIndex?a:b);
     }
@@ -416,11 +421,11 @@ function updateScoped(edited, scope){
   const orig=txById(edited.id); if(!orig) return;
   if(orig.recurrence==="NONE" || scope==="SINGLE"){
     orig.name=edited.name; orig.amount=edited.amount; orig.type=edited.type;
-    orig.monthIndex=edited.monthIndex; orig.dayOfMonth=edited.dayOfMonth;
+    orig.monthIndex=edited.monthIndex; orig.dayOfMonth=edited.dayOfMonth; orig.details=edited.details||"";
     if(orig.recurrence!=="NONE") orig.isOverride=true;
   } else { // THIS_AND_FOLLOWING
     const rows=state.transactions.filter(t=>t.seriesId===orig.seriesId && t.monthIndex>=orig.monthIndex);
-    for(const r of rows){ r.name=edited.name; r.amount=edited.amount; r.type=edited.type; r.dayOfMonth=edited.dayOfMonth; }
+    for(const r of rows){ r.name=edited.name; r.amount=edited.amount; r.type=edited.type; r.dayOfMonth=edited.dayOfMonth; r.details=edited.details||""; }
   }
 }
 
@@ -507,6 +512,11 @@ function render(){
     info.innerHTML='<div class="name"></div><div class="sub"></div>';
     info.querySelector(".name").textContent=t.name;
     info.querySelector(".sub").textContent=subtitle(t);
+    if(t.details && t.details.trim()){
+      const note=document.createElement("div"); note.className="note";
+      note.textContent=t.details.trim();
+      info.appendChild(note);
+    }
     const chip=document.createElement("button"); chip.className="chip"+(t.settled?" on":"");
     chip.textContent=chipLabel(t);
     chip.onclick=(e)=>{ e.stopPropagation(); t.settled=!t.settled; save(); render(); };
@@ -530,6 +540,7 @@ function openEditor(tx){
   document.getElementById("recWrap").style.display=tx?"none":""; // recorrência só ao criar
   document.getElementById("fName").value=tx?tx.name:"";
   document.getElementById("fAmount").value=tx?String(tx.amount).replace(".",","):"";
+  document.getElementById("fDetails").value=tx&&tx.details?tx.details:"";
   const {year,month}=ymOf(tx?tx.monthIndex:currentMonth);
   const day=tx?Math.min(tx.dayOfMonth,daysInMonth(year,month)):Math.min(new Date().getDate(),daysInMonth(year,month));
   document.getElementById("fDate").value=year+"-"+pad2(month)+"-"+pad2(day);
@@ -548,7 +559,8 @@ function collectEditorInput(){
   if(!isFinite(amount)||amount<=0){ alert("Informe um valor válido."); return null; }
   if(!dv){ alert("Informe a data."); return null; }
   const [y,m,d]=dv.split("-").map(Number);
-  return { name, amount, type:getSeg("fType"), monthIndex:y*12+(m-1), dayOfMonth:d,
+  const details=document.getElementById("fDetails").value.trim();
+  return { name, amount, type:getSeg("fType"), monthIndex:y*12+(m-1), dayOfMonth:d, details,
            recurrence:getSeg("fRec"), installmentTotal:parseInt(document.getElementById("fInst").value)||2 };
 }
 
@@ -558,7 +570,7 @@ function onSave(){
     addNew(inp); save(); hideOverlay("editOverlay"); render(); return;
   }
   // edição
-  const edited={ id:editing.id, name:inp.name, amount:inp.amount, type:inp.type, monthIndex:inp.monthIndex, dayOfMonth:inp.dayOfMonth };
+  const edited={ id:editing.id, name:inp.name, amount:inp.amount, type:inp.type, monthIndex:inp.monthIndex, dayOfMonth:inp.dayOfMonth, details:inp.details||"" };
   if(editing.recurrence==="NONE"){
     updateScoped(edited,"SINGLE"); save(); hideOverlay("editOverlay"); render();
   } else {
@@ -614,7 +626,7 @@ function exportBackup(){
   const data={ version:3, transactions: state.transactions.map(t=>({
     seriesId:t.seriesId, name:t.name, amount:t.amount, type:t.type, monthIndex:t.monthIndex,
     dayOfMonth:t.dayOfMonth, recurrence:t.recurrence, installmentNumber:t.installmentNumber,
-    installmentTotal:t.installmentTotal, isOverride:!!t.isOverride, settled:!!t.settled })), tasks:[] };
+    installmentTotal:t.installmentTotal, isOverride:!!t.isOverride, settled:!!t.settled, details:t.details||"" })), tasks:[] };
   const json=JSON.stringify(data,null,2);
   const blob=new Blob([json],{type:"application/json"});
   const fname="faturamento-backup.json";
@@ -636,7 +648,7 @@ function importBackup(text){
       pushTx({ seriesId:t.seriesId??null, name:t.name, amount:Number(t.amount), type:t.type,
         monthIndex:t.monthIndex, dayOfMonth:t.dayOfMonth, recurrence:t.recurrence,
         installmentNumber:t.installmentNumber??null, installmentTotal:t.installmentTotal??null,
-        isOverride:!!t.isOverride });
+        isOverride:!!t.isOverride, details:t.details??"" });
       state.transactions[state.transactions.length-1].settled=!!t.settled;
     }
     save(); render(); alert("Backup importado ("+arr.length+" itens).");
